@@ -25,5 +25,7 @@ COPY --from=frontend-builder /app/frontend/out ./static
 # Railway provides PORT env variable
 ENV PORT=8000
 
-# Start server - use shell form to expand $PORT
-CMD uvicorn main:app --host 0.0.0.0 --port $PORT
+# Start server with extended timeouts for long-running SEC data fetches
+# --timeout-keep-alive: time to keep connections alive
+# --timeout-graceful-shutdown: time to wait for in-flight requests
+CMD uvicorn main:app --host 0.0.0.0 --port $PORT --timeout-keep-alive 300 --timeout-graceful-shutdown 300
