@@ -154,8 +154,13 @@ async def require_auth(request: Request):
 
 
 # ============== BACKGROUND JOB PROCESSING ==============
+import gc  # For manual garbage collection
+
+BATCH_SIZE = 5  # Process 5 filings at a time to stay within 1GB RAM
+
+
 def process_job(job_id: str, name: str, email: str, ticker: str):
-    """Process SEC data in background thread."""
+    """Process SEC data in background thread with batch processing for memory efficiency."""
     try:
         jobs[job_id]["status"] = "processing"
         jobs[job_id]["message"] = "Setting up SEC identity..."
@@ -179,47 +184,98 @@ def process_job(job_id: str, name: str, email: str, ticker: str):
         # Fetch 10-Q filings
         jobs[job_id]["message"] = "Fetching 10-Q filings since 2010..."
         print(f"[{datetime.now()}] Job {job_id}: Fetching filings since 2010...")
-        filings = company.get_filings(form="10-Q").filter(date="2010-01-01:")
-        print(f"[{datetime.now()}] Job {job_id}: Found {len(filings)} filings")
+        all_filings = company.get_filings(form="10-Q").filter(date="2010-01-01:")
+        total_filings = len(all_filings)
+        print(f"[{datetime.now()}] Job {job_id}: Found {total_filings} total filings")
         
-        if len(filings) == 0:
+        if total_filings == 0:
             jobs[job_id]["status"] = "error"
             jobs[job_id]["error"] = f"No 10-Q filings found for {ticker} since 2010."
             return
         
-        # Parse XBRL data
-        jobs[job_id]["message"] = f"Parsing XBRL data for {len(filings)} filings (this takes time)..."
-        print(f"[{datetime.now()}] Job {job_id}: Parsing XBRL data...")
+        # Process filings in batches to prevent memory exhaustion
+        # Each batch: parse XBRL -> extract DataFrames -> append to lists -> clear memory
+        all_bs_dfs = []
+        all_is_dfs = []
+        all_cf_dfs = []
+        all_se_dfs = []
         
-        try:
-            xbrls = edgar.xbrl.XBRLS.from_filings(filings)
-            stitched_statements = xbrls.statements
-        except Exception as e:
-            print(f"[{datetime.now()}] Job {job_id}: Error in Edgar processing: {e}")
-            traceback.print_exc()
+        num_batches = (total_filings + BATCH_SIZE - 1) // BATCH_SIZE
+        
+        for batch_idx in range(num_batches):
+            start_idx = batch_idx * BATCH_SIZE
+            end_idx = min(start_idx + BATCH_SIZE, total_filings)
+            batch_filings = all_filings[start_idx:end_idx]
+            
+            jobs[job_id]["message"] = f"Processing batch {batch_idx + 1}/{num_batches} ({start_idx + 1}-{end_idx} of {total_filings} filings)..."
+            print(f"[{datetime.now()}] Job {job_id}: Processing batch {batch_idx + 1}/{num_batches} (filings {start_idx + 1}-{end_idx})")
+            
+            try:
+                # Parse XBRL for this batch
+                xbrls = edgar.xbrl.XBRLS.from_filings(batch_filings)
+                statements = xbrls.statements
+                batch_size = len(batch_filings)
+                
+                # Extract DataFrames for this batch
+                try:
+                    bs_df = statements.balance_sheet(max_periods=batch_size).to_dataframe()
+                    all_bs_dfs.append(bs_df)
+                except Exception as e:
+                    print(f"[{datetime.now()}] Job {job_id}: Batch {batch_idx + 1} - Balance sheet error: {e}")
+                
+                try:
+                    is_df = statements.income_statement(max_periods=batch_size).to_dataframe()
+                    all_is_dfs.append(is_df)
+                except Exception as e:
+                    print(f"[{datetime.now()}] Job {job_id}: Batch {batch_idx + 1} - Income statement error: {e}")
+                
+                try:
+                    cf_df = statements.cashflow_statement(max_periods=batch_size).to_dataframe()
+                    all_cf_dfs.append(cf_df)
+                except Exception as e:
+                    print(f"[{datetime.now()}] Job {job_id}: Batch {batch_idx + 1} - Cash flow error: {e}")
+                
+                try:
+                    se_df = statements.statement_of_equity(max_periods=batch_size).to_dataframe()
+                    all_se_dfs.append(se_df)
+                except Exception as e:
+                    print(f"[{datetime.now()}] Job {job_id}: Batch {batch_idx + 1} - Equity statement error: {e}")
+                
+                # Clear memory after each batch
+                del xbrls, statements
+                gc.collect()
+                print(f"[{datetime.now()}] Job {job_id}: Batch {batch_idx + 1} complete, memory cleared")
+                
+            except Exception as e:
+                print(f"[{datetime.now()}] Job {job_id}: Error in batch {batch_idx + 1}: {e}")
+                traceback.print_exc()
+                # Continue with other batches even if one fails
+                continue
+        
+        # Check if we got any data
+        if not all_bs_dfs and not all_is_dfs and not all_cf_dfs and not all_se_dfs:
             jobs[job_id]["status"] = "error"
-            jobs[job_id]["error"] = f"Error fetching filings: {str(e)}"
+            jobs[job_id]["error"] = "Failed to extract any financial data from filings."
             return
         
-        # Generate DataFrames
-        jobs[job_id]["message"] = "Generating financial statements..."
-        available_periods = len(filings)
-        print(f"[{datetime.now()}] Job {job_id}: Converting to DataFrames ({available_periods} periods)...")
+        # Concatenate all batch results
+        jobs[job_id]["message"] = "Combining batched results..."
+        print(f"[{datetime.now()}] Job {job_id}: Concatenating {len(all_bs_dfs)} batch results...")
         
-        try:
-            BS = stitched_statements.balance_sheet(max_periods=available_periods).to_dataframe()
-            IS = stitched_statements.income_statement(max_periods=available_periods).to_dataframe()
-            CF = stitched_statements.cashflow_statement(max_periods=available_periods).to_dataframe()
-            SE = stitched_statements.statement_of_equity(max_periods=available_periods).to_dataframe()
-        except Exception as e:
-            print(f"[{datetime.now()}] Job {job_id}: Error generating DataFrames: {e}")
-            traceback.print_exc()
-            jobs[job_id]["status"] = "error"
-            jobs[job_id]["error"] = f"Error processing financial statements: {str(e)}"
-            return
+        # Concatenate DataFrames horizontally (columns = periods)
+        BS = pd.concat(all_bs_dfs, axis=1) if all_bs_dfs else pd.DataFrame()
+        IS = pd.concat(all_is_dfs, axis=1) if all_is_dfs else pd.DataFrame()
+        CF = pd.concat(all_cf_dfs, axis=1) if all_cf_dfs else pd.DataFrame()
+        SE = pd.concat(all_se_dfs, axis=1) if all_se_dfs else pd.DataFrame()
+        
+        # Clear batch lists
+        del all_bs_dfs, all_is_dfs, all_cf_dfs, all_se_dfs
+        gc.collect()
         
         # Create Excel file
         jobs[job_id]["message"] = "Creating Excel file..."
+        print(f"[{datetime.now()}] Job {job_id}: Creating Excel file...")
+        
         BS_ROW = 0
         IS_ROW = len(BS) + 2
         CF_ROW = IS_ROW + len(IS) + 1
@@ -227,19 +283,23 @@ def process_job(job_id: str, name: str, email: str, ticker: str):
         
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            BS.to_excel(writer, sheet_name='Combined', startrow=BS_ROW, index=False)
-            IS.to_excel(writer, sheet_name='Combined', startrow=IS_ROW, index=False, header=False)
-            CF.to_excel(writer, sheet_name='Combined', startrow=CF_ROW, index=False, header=False)
-            SE.to_excel(writer, sheet_name='Combined', startrow=SE_ROW, index=False, header=False)
+            if not BS.empty:
+                BS.to_excel(writer, sheet_name='Combined', startrow=BS_ROW, index=False)
+            if not IS.empty:
+                IS.to_excel(writer, sheet_name='Combined', startrow=IS_ROW, index=False, header=False)
+            if not CF.empty:
+                CF.to_excel(writer, sheet_name='Combined', startrow=CF_ROW, index=False, header=False)
+            if not SE.empty:
+                SE.to_excel(writer, sheet_name='Combined', startrow=SE_ROW, index=False, header=False)
         
         output.seek(0)
         
         # Store result
         jobs[job_id]["status"] = "completed"
-        jobs[job_id]["message"] = "Report ready for download!"
+        jobs[job_id]["message"] = f"Report ready! Processed {total_filings} filings."
         jobs[job_id]["result"] = output.getvalue()
         jobs[job_id]["filename"] = f"{ticker.upper()}_10Q_Financials.xlsx"
-        print(f"[{datetime.now()}] Job {job_id}: Completed successfully")
+        print(f"[{datetime.now()}] Job {job_id}: Completed successfully with {total_filings} filings")
         
     except Exception as e:
         print(f"[{datetime.now()}] Job {job_id}: Global error: {e}")
