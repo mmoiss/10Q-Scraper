@@ -1,0 +1,45 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# Environment files (NEVER commit these!)
+.env
+.env.local
+.env.*.local
+
+# Build outputs
+.next/
+out/
+dist/
+build/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Generated files
+*.xlsx
+*.log
+
+# Vercel
+.vercel
+
+# Python
+*.pyo
+*.pyd
+.Python
+pip-log.txt
+
+# Markdown Files
+DEPLOYMENT.md
