@@ -1,10 +1,11 @@
 [phases.setup]
-nixPkgs = ["nodejs_20", "python311", "python311Packages.pip"]
+nixPkgs = ["nodejs_20", "python311"]
 
 [phases.install]
 cmds = [
   "cd frontend && npm ci",
-  "cd backend && pip install -r requirements.txt"
+  "python -m venv /app/venv",
+  "source /app/venv/bin/activate && cd backend && pip install -r requirements.txt"
 ]
 
 [phases.build]
@@ -14,4 +15,4 @@ cmds = [
 ]
 
 [start]
-cmd = "cd backend && uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"
+cmd = "source /app/venv/bin/activate && cd backend && uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"
