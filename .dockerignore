@@ -1,0 +1,20 @@
+# Dependencies
+frontend/node_modules
+frontend/.next
+backend/__pycache__
+backend/*.pyc
+backend/venv
+backend/static
+
+# Git
+.git
+.gitignore
+
+# IDE
+.vscode
+.idea
+
+# Misc
+*.md
+*.log
+build.sh
