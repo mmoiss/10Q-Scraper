@@ -142,8 +142,14 @@ def get_session_token(request: Request) -> str | None:
 async def require_auth(request: Request):
     """Dependency to require authentication."""
     token = get_session_token(request)
+    # Debug logging
+    print(f"[AUTH DEBUG] Session token received: {token[:10]}..." if token else "[AUTH DEBUG] No session token")
+    print(f"[AUTH DEBUG] All cookies: {list(request.cookies.keys())}")
+    print(f"[AUTH DEBUG] Active sessions: {len(sessions)}")
     if not verify_session(token):
+        print(f"[AUTH DEBUG] Session verification FAILED")
         raise HTTPException(status_code=401, detail="Authentication required")
+    print(f"[AUTH DEBUG] Session verification OK")
     return token
 
 
@@ -278,9 +284,11 @@ async def login(request: Request, login_data: LoginRequest, response: Response):
     
     # Create session
     token = create_session()
+    print(f"[AUTH DEBUG] Login successful for {login_data.username}, created session token: {token[:10]}...")
     
     # Determine if we're in production (HTTPS)
     is_production = FRONTEND_URL.startswith("https://")
+    print(f"[AUTH DEBUG] Is production: {is_production}, FRONTEND_URL: {FRONTEND_URL}")
     
     # Set cookie with appropriate security settings
     response.set_cookie(
@@ -289,6 +297,7 @@ async def login(request: Request, login_data: LoginRequest, response: Response):
         httponly=True,
         secure=is_production,  # Only require HTTPS in production
         samesite="lax",  # Same-origin deployment, lax is fine
+        path="/",  # Ensure cookie is sent for all routes
         max_age=int(SESSION_DURATION.total_seconds()),
     )
     

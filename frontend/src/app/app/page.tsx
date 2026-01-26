@@ -61,13 +61,17 @@ export default function AppPage() {
         router.push("/");
     };
 
-    const pollJobStatus = async (jobId: string) => {
+    const pollJobStatus = async (jobId: string, jobTicker: string) => {
         try {
             const response = await fetch(`/api/job/${jobId}`, {
                 credentials: "include",
             });
 
             if (response.status === 401) {
+                if (pollIntervalRef.current) {
+                    clearInterval(pollIntervalRef.current);
+                    pollIntervalRef.current = null;
+                }
                 router.push("/");
                 return;
             }
@@ -98,7 +102,7 @@ export default function AppPage() {
                 const blob = await downloadResponse.blob();
                 const url = window.URL.createObjectURL(blob);
                 setDownloadUrl(url);
-                setFileName(`${ticker.toUpperCase()}_10Q_Financials.xlsx`);
+                setFileName(`${jobTicker}_10Q_Financials.xlsx`);
                 setFormState("success");
                 setStatusMessage("");
             } else if (data.status === "error") {
@@ -166,10 +170,12 @@ export default function AppPage() {
 
             const data = await response.json();
             const jobId = data.job_id;
+            const jobTicker = ticker.toUpperCase();
 
-            // Start polling for job status
+            // Start polling for job status - poll immediately, then every 2 seconds
             setStatusMessage("Processing SEC filings...");
-            pollIntervalRef.current = setInterval(() => pollJobStatus(jobId), 2000);
+            pollJobStatus(jobId, jobTicker);  // Poll immediately
+            pollIntervalRef.current = setInterval(() => pollJobStatus(jobId, jobTicker), 2000);
 
         } catch (error) {
             setFormState("error");
