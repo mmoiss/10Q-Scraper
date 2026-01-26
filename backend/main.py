@@ -4,6 +4,8 @@ load_dotenv()  # Load .env file before other imports use os.getenv
 from fastapi import FastAPI, HTTPException, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+import pathlib
 from pydantic import BaseModel, EmailStr
 from datetime import datetime, timedelta, timezone
 import edgar
@@ -43,13 +45,13 @@ RATE_LIMIT_WINDOW = 60  # seconds
 
 
 # ============== CORS CONFIGURATION ==============
+# For same-origin deployment, we only need localhost for development
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         FRONTEND_URL,
-        "https://10-q-scraper.vercel.app",
-        "https://10-q-scraper.vercel.app/",
         "http://localhost:3000",
+        "http://localhost:8000",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -174,7 +176,7 @@ async def login(request: Request, login_data: LoginRequest, response: Response):
         value=token,
         httponly=True,
         secure=is_production,  # Only require HTTPS in production
-        samesite="none" if is_production else "lax",  # 'none' required for cross-origin cookies
+        samesite="lax",  # Same-origin deployment, lax is fine
         max_age=int(SESSION_DURATION.total_seconds()),
     )
     
@@ -323,6 +325,14 @@ def generate_excel(
             status_code=500,
             detail=f"An unexpected error occurred: {str(e)}"
         )
+
+
+# ============== STATIC FILES ==============
+# Mount static files AFTER all API routes (order matters!)
+# This serves the Next.js static export
+static_dir = pathlib.Path(__file__).parent / "static"
+if static_dir.exists():
+    app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
 
 
 if __name__ == "__main__":

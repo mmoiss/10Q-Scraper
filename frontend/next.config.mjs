@@ -1,16 +1,12 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  async rewrites() {
-    // Hardcoded for debugging
-    const backendUrl = "https://10q-scraper-production.up.railway.app";
-
-    return [
-      {
-        source: "/api/:path*",
-        destination: `${backendUrl}/api/:path*`,
-      },
-    ];
+  output: 'export',
+  // Disable image optimization for static export
+  images: {
+    unoptimized: true,
   },
+  // Trailing slash helps with static file serving
+  trailingSlash: true,
 };
 
 export default nextConfig;
