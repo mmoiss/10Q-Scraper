@@ -2,8 +2,9 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   async rewrites() {
-    // Use environment variable for production, fallback to localhost for dev
-    const backendUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+    // Hardcoded for debugging
+    const backendUrl = "https://10q-scraper-production.up.railway.app";
+
 
     return [
       {
