@@ -1,7 +1,7 @@
 from dotenv import load_dotenv
 load_dotenv()  # Load .env file before other imports use os.getenv
 
-from fastapi import FastAPI, HTTPException, Depends, Request, Response
+from fastapi import FastAPI, HTTPException, Depends, Request, Response, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -17,6 +17,8 @@ import secrets
 import os
 from collections import defaultdict
 import time
+import threading
+import uuid
 
 
 app = FastAPI(title="SEC Scraper API")
@@ -42,6 +44,10 @@ SESSION_DURATION = timedelta(hours=24)
 rate_limit_storage: dict[str, list[float]] = defaultdict(list)
 RATE_LIMIT_REQUESTS = 10  # requests
 RATE_LIMIT_WINDOW = 60  # seconds
+
+# Job storage for background processing
+jobs: dict[str, dict] = {}
+JOB_EXPIRY = timedelta(hours=1)
 
 
 # ============== CORS CONFIGURATION ==============
@@ -141,6 +147,112 @@ async def require_auth(request: Request):
     return token
 
 
+# ============== BACKGROUND JOB PROCESSING ==============
+def process_job(job_id: str, name: str, email: str, ticker: str):
+    """Process SEC data in background thread."""
+    try:
+        jobs[job_id]["status"] = "processing"
+        jobs[job_id]["message"] = "Setting up SEC identity..."
+        
+        # Set identity for SEC Edgar API
+        identity = f"{name} {email}"
+        print(f"[{datetime.now()}] Job {job_id}: Setting identity to: {identity}")
+        edgar.set_identity(identity)
+        
+        # Fetch company data
+        jobs[job_id]["message"] = f"Fetching company data for {ticker}..."
+        print(f"[{datetime.now()}] Job {job_id}: Fetching company: {ticker}")
+        
+        try:
+            company = edgar.Company(ticker.upper())
+        except Exception as e:
+            jobs[job_id]["status"] = "error"
+            jobs[job_id]["error"] = f"Invalid company ticker: {ticker}. Please check the ticker symbol and try again."
+            return
+        
+        # Fetch 10-Q filings
+        jobs[job_id]["message"] = "Fetching 10-Q filings since 2010..."
+        print(f"[{datetime.now()}] Job {job_id}: Fetching filings since 2010...")
+        filings = company.get_filings(form="10-Q").filter(date="2010-01-01:")
+        print(f"[{datetime.now()}] Job {job_id}: Found {len(filings)} filings")
+        
+        if len(filings) == 0:
+            jobs[job_id]["status"] = "error"
+            jobs[job_id]["error"] = f"No 10-Q filings found for {ticker} since 2010."
+            return
+        
+        # Parse XBRL data
+        jobs[job_id]["message"] = f"Parsing XBRL data for {len(filings)} filings (this takes time)..."
+        print(f"[{datetime.now()}] Job {job_id}: Parsing XBRL data...")
+        
+        try:
+            xbrls = edgar.xbrl.XBRLS.from_filings(filings)
+            stitched_statements = xbrls.statements
+        except Exception as e:
+            print(f"[{datetime.now()}] Job {job_id}: Error in Edgar processing: {e}")
+            traceback.print_exc()
+            jobs[job_id]["status"] = "error"
+            jobs[job_id]["error"] = f"Error fetching filings: {str(e)}"
+            return
+        
+        # Generate DataFrames
+        jobs[job_id]["message"] = "Generating financial statements..."
+        available_periods = len(filings)
+        print(f"[{datetime.now()}] Job {job_id}: Converting to DataFrames ({available_periods} periods)...")
+        
+        try:
+            BS = stitched_statements.balance_sheet(max_periods=available_periods).to_dataframe()
+            IS = stitched_statements.income_statement(max_periods=available_periods).to_dataframe()
+            CF = stitched_statements.cashflow_statement(max_periods=available_periods).to_dataframe()
+            SE = stitched_statements.statement_of_equity(max_periods=available_periods).to_dataframe()
+        except Exception as e:
+            print(f"[{datetime.now()}] Job {job_id}: Error generating DataFrames: {e}")
+            traceback.print_exc()
+            jobs[job_id]["status"] = "error"
+            jobs[job_id]["error"] = f"Error processing financial statements: {str(e)}"
+            return
+        
+        # Create Excel file
+        jobs[job_id]["message"] = "Creating Excel file..."
+        BS_ROW = 0
+        IS_ROW = len(BS) + 2
+        CF_ROW = IS_ROW + len(IS) + 1
+        SE_ROW = CF_ROW + len(CF) + 1
+        
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            BS.to_excel(writer, sheet_name='Combined', startrow=BS_ROW, index=False)
+            IS.to_excel(writer, sheet_name='Combined', startrow=IS_ROW, index=False, header=False)
+            CF.to_excel(writer, sheet_name='Combined', startrow=CF_ROW, index=False, header=False)
+            SE.to_excel(writer, sheet_name='Combined', startrow=SE_ROW, index=False, header=False)
+        
+        output.seek(0)
+        
+        # Store result
+        jobs[job_id]["status"] = "completed"
+        jobs[job_id]["message"] = "Report ready for download!"
+        jobs[job_id]["result"] = output.getvalue()
+        jobs[job_id]["filename"] = f"{ticker.upper()}_10Q_Financials.xlsx"
+        print(f"[{datetime.now()}] Job {job_id}: Completed successfully")
+        
+    except Exception as e:
+        print(f"[{datetime.now()}] Job {job_id}: Global error: {e}")
+        traceback.print_exc()
+        jobs[job_id]["status"] = "error"
+        jobs[job_id]["error"] = f"An unexpected error occurred: {str(e)}"
+
+
+def cleanup_expired_jobs():
+    """Remove expired jobs from storage."""
+    now = datetime.now(timezone.utc)
+    expired = [
+        job_id for job_id, job in jobs.items()
+        if now > job.get("expires_at", now)
+    ]
+    for job_id in expired:
+        del jobs[job_id]
+
+
 # ============== ENDPOINTS ==============
 @app.get("/api/health")
 async def health_check():
@@ -203,12 +315,12 @@ async def check_auth(request: Request):
 
 
 @app.post("/api/generate")
-def generate_excel(
+async def generate_excel(
     request: Request,
     data: GenerateRequest,
     _token: str = Depends(require_auth)
 ):
-    """Generate an Excel file with SEC 10-Q financial statements."""
+    """Start background job to generate Excel file. Returns job ID for polling."""
     client_ip = get_client_ip(request)
     print(f"[{datetime.now()}] Starting generation for {data.ticker} by {data.email} from {client_ip}")
     
@@ -220,111 +332,69 @@ def generate_excel(
             detail="Rate limit exceeded. Please wait before making another request."
         )
     
-    try:
-        # Set identity for SEC Edgar API
-        identity = f"{data.name} {data.email}"
-        print(f"[{datetime.now()}] Setting identity to: {identity}")
-        edgar.set_identity(identity)
-        
-        # Fetch company data
-        try:
-            print(f"[{datetime.now()}] Fetching company: {data.ticker}")
-            company = edgar.Company(data.ticker.upper())
-            print(f"[{datetime.now()}] Company fetched: {company}")
-        except Exception as e:
-            print(f"[{datetime.now()}] Error fetching company: {e}")
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid company ticker: {data.ticker}. Please check the ticker symbol and try again."
-            )
-        
-        # Fetch 10-Q filings
-        try:
-            print(f"[{datetime.now()}] Fetching filings since 2010...")
-            filings = company.get_filings(form="10-Q").filter(date="2010-01-01:")
-            print(f"[{datetime.now()}] Found {len(filings)} filings")
-            
-            if len(filings) == 0:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"No 10-Q filings found for {data.ticker} since 2010."
-                )
-            
-            print(f"[{datetime.now()}] Parsing XBRL data (this may take a while)...")
-            xbrls = edgar.xbrl.XBRLS.from_filings(filings)
-            print(f"[{datetime.now()}] XBRL parsed. Stitching statements...")
-            stitched_statements = xbrls.statements
-            print(f"[{datetime.now()}] Statements stitched.")
-            
-        except HTTPException:
-            raise
-        except Exception as e:
-            print(f"[{datetime.now()}] Error in Edgar processing: {e}")
-            traceback.print_exc()
-            raise HTTPException(
-                status_code=500,
-                detail=f"Error fetching filings: {str(e)}"
-            )
-        
-        # Generate financial statements DataFrames
-        available_periods = len(filings)
-        print(f"[{datetime.now()}] Converting to DataFrames ({available_periods} periods)...")
-        
-        try:
-            BS = stitched_statements.balance_sheet(max_periods=available_periods).to_dataframe()
-            print(f"[{datetime.now()}] Balance Sheet generated")
-            IS = stitched_statements.income_statement(max_periods=available_periods).to_dataframe()
-            print(f"[{datetime.now()}] Income Statement generated")
-            CF = stitched_statements.cashflow_statement(max_periods=available_periods).to_dataframe()
-            print(f"[{datetime.now()}] Cash Flow generated")
-            SE = stitched_statements.statement_of_equity(max_periods=available_periods).to_dataframe()
-            print(f"[{datetime.now()}] Equity Statement generated")
-        except Exception as e:
-            print(f"[{datetime.now()}] Error generating DataFrames: {e}")
-            traceback.print_exc()
-            raise HTTPException(
-                status_code=500,
-                detail=f"Error processing financial statements: {str(e)}"
-            )
-        
-        # Calculate row positions for combined sheet
-        BS_ROW = 0
-        IS_ROW = len(BS) + 2
-        CF_ROW = IS_ROW + len(IS) + 1
-        SE_ROW = CF_ROW + len(CF) + 1
-        
-        # Create Excel file in memory
-        print(f"[{datetime.now()}] Writing to Excel...")
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            BS.to_excel(writer, sheet_name='Combined', startrow=BS_ROW, index=False)
-            IS.to_excel(writer, sheet_name='Combined', startrow=IS_ROW, index=False, header=False)
-            CF.to_excel(writer, sheet_name='Combined', startrow=CF_ROW, index=False, header=False)
-            SE.to_excel(writer, sheet_name='Combined', startrow=SE_ROW, index=False, header=False)
-        
-        output.seek(0)
-        print(f"[{datetime.now()}] Excel created. Size: {output.getbuffer().nbytes} bytes. Returning response.")
-        
-        # Return as downloadable file
-        filename = f"{data.ticker.upper()}_10Q_Financials.xlsx"
-        
-        return StreamingResponse(
-            output,
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={
-                "Content-Disposition": f'attachment; filename="{filename}"'
-            }
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"[{datetime.now()}] Global error: {e}")
-        traceback.print_exc()
-        raise HTTPException(
-            status_code=500,
-            detail=f"An unexpected error occurred: {str(e)}"
-        )
+    # Cleanup expired jobs
+    cleanup_expired_jobs()
+    
+    # Create job
+    job_id = str(uuid.uuid4())
+    jobs[job_id] = {
+        "status": "pending",
+        "message": "Starting job...",
+        "created_at": datetime.now(timezone.utc),
+        "expires_at": datetime.now(timezone.utc) + JOB_EXPIRY,
+        "ticker": data.ticker.upper(),
+    }
+    
+    # Start background thread
+    thread = threading.Thread(
+        target=process_job,
+        args=(job_id, data.name, data.email, data.ticker)
+    )
+    thread.start()
+    
+    return {"job_id": job_id, "status": "pending", "message": "Job started"}
+
+
+@app.get("/api/job/{job_id}")
+async def get_job_status(job_id: str, request: Request, _token: str = Depends(require_auth)):
+    """Check the status of a background job."""
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    job = jobs[job_id]
+    return {
+        "job_id": job_id,
+        "status": job["status"],
+        "message": job.get("message", ""),
+        "error": job.get("error"),
+    }
+
+
+@app.get("/api/job/{job_id}/download")
+async def download_job_result(job_id: str, request: Request, _token: str = Depends(require_auth)):
+    """Download the result of a completed job."""
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    job = jobs[job_id]
+    
+    if job["status"] != "completed":
+        raise HTTPException(status_code=400, detail="Job not completed yet")
+    
+    if "result" not in job:
+        raise HTTPException(status_code=500, detail="Result not available")
+    
+    # Return file
+    output = io.BytesIO(job["result"])
+    filename = job.get("filename", "report.xlsx")
+    
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"'
+        }
+    )
 
 
 # ============== STATIC FILES ==============

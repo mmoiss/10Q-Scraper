@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 
 type FormState = "idle" | "loading" | "success" | "error";
@@ -11,10 +11,21 @@ export default function AppPage() {
     const [ticker, setTicker] = useState("");
     const [formState, setFormState] = useState<FormState>("idle");
     const [errorMessage, setErrorMessage] = useState("");
+    const [statusMessage, setStatusMessage] = useState("");
     const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
     const [fileName, setFileName] = useState("");
     const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
     const router = useRouter();
+    const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+    // Cleanup polling on unmount
+    useEffect(() => {
+        return () => {
+            if (pollIntervalRef.current) {
+                clearInterval(pollIntervalRef.current);
+            }
+        };
+    }, []);
 
     // Check authentication on mount
     useEffect(() => {
@@ -50,20 +61,82 @@ export default function AppPage() {
         router.push("/");
     };
 
+    const pollJobStatus = async (jobId: string) => {
+        try {
+            const response = await fetch(`/api/job/${jobId}`, {
+                credentials: "include",
+            });
+
+            if (response.status === 401) {
+                router.push("/");
+                return;
+            }
+
+            if (!response.ok) {
+                throw new Error("Failed to check job status");
+            }
+
+            const data = await response.json();
+            setStatusMessage(data.message || "Processing...");
+
+            if (data.status === "completed") {
+                // Stop polling
+                if (pollIntervalRef.current) {
+                    clearInterval(pollIntervalRef.current);
+                    pollIntervalRef.current = null;
+                }
+
+                // Download the result
+                const downloadResponse = await fetch(`/api/job/${jobId}/download`, {
+                    credentials: "include",
+                });
+
+                if (!downloadResponse.ok) {
+                    throw new Error("Failed to download result");
+                }
+
+                const blob = await downloadResponse.blob();
+                const url = window.URL.createObjectURL(blob);
+                setDownloadUrl(url);
+                setFileName(`${ticker.toUpperCase()}_10Q_Financials.xlsx`);
+                setFormState("success");
+                setStatusMessage("");
+            } else if (data.status === "error") {
+                // Stop polling
+                if (pollIntervalRef.current) {
+                    clearInterval(pollIntervalRef.current);
+                    pollIntervalRef.current = null;
+                }
+                throw new Error(data.error || "An error occurred");
+            }
+            // If still processing, polling continues
+        } catch (error) {
+            if (pollIntervalRef.current) {
+                clearInterval(pollIntervalRef.current);
+                pollIntervalRef.current = null;
+            }
+            setFormState("error");
+            setErrorMessage(
+                error instanceof Error ? error.message : "An unexpected error occurred."
+            );
+        }
+    };
+
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         setFormState("loading");
         setErrorMessage("");
+        setStatusMessage("Starting job...");
         setDownloadUrl(null);
 
         try {
-            // Use relative path to leverage Next.js rewrites for proper proxying
+            // Start the background job
             const response = await fetch("/api/generate", {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
                 },
-                credentials: "include", // Ensure session cookies are sent
+                credentials: "include",
                 body: JSON.stringify({
                     name,
                     email,
@@ -72,33 +145,32 @@ export default function AppPage() {
             });
 
             if (response.status === 401) {
-                // Session expired, redirect to login
                 router.push("/");
                 return;
             }
 
             if (!response.ok) {
-                let errorMessage = "An error occurred while generating the report.";
+                let errorMsg = "An error occurred while starting the job.";
                 try {
                     const errorData = await response.json();
                     if (errorData.detail) {
-                        if (Array.isArray(errorData.detail)) {
-                            errorMessage = errorData.detail[0]?.msg || errorMessage;
-                        } else {
-                            errorMessage = errorData.detail;
-                        }
+                        errorMsg = Array.isArray(errorData.detail)
+                            ? errorData.detail[0]?.msg || errorMsg
+                            : errorData.detail;
                     }
                 } catch {
-                    errorMessage = `Server error: ${response.status} ${response.statusText}`;
+                    errorMsg = `Server error: ${response.status} ${response.statusText}`;
                 }
-                throw new Error(errorMessage);
+                throw new Error(errorMsg);
             }
 
-            const blob = await response.blob();
-            const url = window.URL.createObjectURL(blob);
-            setDownloadUrl(url);
-            setFileName(`${ticker.toUpperCase()}_10Q_Financials.xlsx`);
-            setFormState("success");
+            const data = await response.json();
+            const jobId = data.job_id;
+
+            // Start polling for job status
+            setStatusMessage("Processing SEC filings...");
+            pollIntervalRef.current = setInterval(() => pollJobStatus(jobId), 2000);
+
         } catch (error) {
             setFormState("error");
             setErrorMessage(
@@ -248,7 +320,7 @@ export default function AppPage() {
                                     <div className="fade-in">
                                         <div className="text-center py-4">
                                             <p className="text-gray-400 text-sm mb-3">
-                                                Fetching SEC filings... This may take 30-60 seconds.
+                                                {statusMessage || "Processing..."}
                                             </p>
                                             <div className="progress-bar">
                                                 <div className="progress-bar-inner" />
