@@ -40,6 +40,3 @@ Thumbs.db
 *.pyd
 .Python
 pip-log.txt
-
-# Markdown Files
-DEPLOYMENT.md

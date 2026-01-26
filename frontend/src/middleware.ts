@@ -19,7 +19,7 @@ export async function middleware(request: NextRequest) {
 
         // Verify session with backend
         try {
-            const backendUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+            const backendUrl = process.env.NEXT_PUBLIC_API_URL || "https://10q-scraper-production.up.railway.app";
             console.log("[Middleware] Checking with backend:", backendUrl);
 
             const response = await fetch(`${backendUrl}/api/auth/check`, {

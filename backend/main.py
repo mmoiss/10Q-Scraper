@@ -47,6 +47,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         FRONTEND_URL,
+        "https://10-q-scraper.vercel.app",
+        "https://10-q-scraper.vercel.app/",
         "http://localhost:3000",
     ],
     allow_credentials=True,
@@ -172,7 +174,7 @@ async def login(request: Request, login_data: LoginRequest, response: Response):
         value=token,
         httponly=True,
         secure=is_production,  # Only require HTTPS in production
-        samesite="lax",  # Allow cookie to be sent with redirects
+        samesite="none" if is_production else "lax",  # 'none' required for cross-origin cookies
         max_age=int(SESSION_DURATION.total_seconds()),
     )
     

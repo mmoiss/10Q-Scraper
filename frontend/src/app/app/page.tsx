@@ -56,11 +56,9 @@ export default function AppPage() {
         setErrorMessage("");
         setDownloadUrl(null);
 
-        const backendUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-
         try {
-            // Bypass Next.js proxy to avoid timeouts on long requests
-            const response = await fetch(`${backendUrl}/api/generate`, {
+            // Use relative path to leverage Next.js rewrites for proper proxying
+            const response = await fetch("/api/generate", {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",

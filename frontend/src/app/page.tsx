@@ -16,7 +16,7 @@ export default function LoginPage() {
     setIsLoading(true);
 
     try {
-      const response = await fetch("https://10q-scraper-production.up.railway.app/api/login", {
+      const response = await fetch("/api/login", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
