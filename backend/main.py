@@ -162,74 +162,69 @@ BATCH_SIZE = 5  # Process 5 filings at a time to stay within 1GB RAM
 
 def consolidate_dataframes(dfs: list[pd.DataFrame]) -> pd.DataFrame:
     """
-    Consolidate a list of DataFrames based on metadata columns.
-    Ensures that metadata columns (label, concept, etc.) are used as the index
-    for concatenation, preventing duplication of these columns in the final output.
+    Consolidate a list of DataFrames by merging on 'label' and 'concept'.
+    This handles:
+    1. Duplicated metadata columns (merges them).
+    2. Split rows due to dimensions (merges them by taking the first non-null value).
+    3. Overlapping date columns (merges them).
     """
     if not dfs:
         return pd.DataFrame()
     
-    # Identify metadata columns (order matters for index)
-    metadata_cols = []
-    seen_cols = set()
+    # Primary keys for row uniqueness
+    index_cols = ['label', 'concept']
     
-    for df in dfs:
-        for col in df.columns:
-            # Check if column is a duplicate of a metadata col (string match)
-            if col in seen_cols:
-                continue
-                
-            # Check if column is a date (YYYY-MM-DD format or datetime object)
-            is_date = False
-            if isinstance(col, (datetime, pd.Timestamp)):
-                is_date = True
-            elif isinstance(col, str) and re.match(r'^\d{4}-\d{2}-\d{2}$', col):
-                is_date = True
-            
-            if not is_date:
-                metadata_cols.append(col)
-                seen_cols.add(col)
-    
-    if not metadata_cols:
-        # Fallback if no metadata found (e.g. only dates?)
-        # Should not happen for standard edgartools output
-        return pd.concat(dfs, axis=1)
-    
-    # Reindex each DF to have common metadata columns
     processed_dfs = []
+    
     for df in dfs:
-        # Ensure all metadata cols exist (fill with None/NaN)
-        # Note: modifying df in place might affect original reference, usually fine here
-        missing_cols = [c for c in metadata_cols if c not in df.columns]
-        if missing_cols:
-            df = df.reindex(columns=df.columns.tolist() + missing_cols)
-        
-        # Set index to metadata columns
-        # Drop=True removes them from columns (so they don't get duplicated)
-        # We need to drop duplicates in metadata index to avoid explosion
-        # If duplicates exist (as seen in BS inspection), we must handle them.
-        # Option: deduplicate by keeping first? Or use cumcount to differentiating?
-        # Inspection showed duplicates in 'concept, label'.
-        # But if we include ALL metadata columns (e.g. dimensions), are they unique?
-        # We assume so. If not, set_index/concat might verify_integrity=False (default).
-        # But duplicate index in concatenation causes Cartesian product of duplicates!
-        # We must deduplicate strictly.
-        df_indexed = df.set_index(metadata_cols)
-        
-        # Remove duplicate rows in the index if any remain?
-        if df_indexed.index.duplicated().any():
-            # Keep first occurrence of each unique metadata combination
-            df_indexed = df_indexed[~df_indexed.index.duplicated(keep='first')]
+        # Ensure required keys exist
+        if not all(c in df.columns for c in index_cols):
+            continue
             
-        processed_dfs.append(df_indexed)
+        # Group by keys to merge split rows within a batch (e.g. Dimensions)
+        # first() takes the first non-null value
+        df_grouped = df.groupby(index_cols).first()
+        processed_dfs.append(df_grouped)
         
-    # Concat outer join
+    if not processed_dfs:
+        return pd.DataFrame()
+        
+    # Concatenate all batches horizontally (outer join on label/concept index)
     combined = pd.concat(processed_dfs, axis=1)
     
-    # Reset index to restore metadata columns
+    # Deduplicate columns (e.g. '2023-12-31' appearing in multiple batches)
+    # and merge metadata columns ('level', 'parent_concept', etc.)
+    combined = combined.groupby(level=0, axis=1).first()
+    
+    # Reset index to restore label/concept as columns
     combined.reset_index(inplace=True)
     
-    return combined
+    # Reorder columns: Metadata first, then Dates (Newest to Oldest)
+    cols = combined.columns.tolist()
+    
+    def is_date(c):
+        if isinstance(c, (datetime, pd.Timestamp)): return True
+        return isinstance(c, str) and re.match(r'^\d{4}-\d{2}-\d{2}$', c)
+        
+    date_cols = [c for c in cols if is_date(c)]
+    meta_cols = [c for c in cols if not is_date(c)]
+    
+    # Sort dates descending (Newest First)
+    date_cols.sort(key=lambda x: str(x), reverse=True)
+    
+    # Ensure label is at the start, and concept is at the very end
+    priority_start = ['label']
+    priority_end = ['concept']
+    
+    other_meta = [c for c in meta_cols if c not in priority_start and c not in priority_end]
+    
+    # Final order: Label -> Other Meta -> Dates -> Concept
+    final_order = priority_start + other_meta + date_cols + priority_end
+    
+    # Select only existing columns (safety check)
+    final_order = [c for c in final_order if c in combined.columns]
+    
+    return combined[final_order]
 
 
 def process_job(job_id: str, name: str, email: str, ticker: str):
@@ -373,6 +368,22 @@ def process_job(job_id: str, name: str, email: str, ticker: str):
                 CF.to_excel(writer, sheet_name='Combined', startrow=CF_ROW, index=False, header=False)
             if not SE.empty:
                 SE.to_excel(writer, sheet_name='Combined', startrow=SE_ROW, index=False, header=False)
+            workbook = writer.book
+            worksheet = workbook['Combined']
+
+            # Apply Accounting format to all cells
+            # Format: _(* #,##0.00_);_(* (#,##0.00);_(* "-"??_);_(@_)
+            accounting_format_str = '_(* #,##0.00_);_(* (#,##0.00);_(* "-"??_);_(@_)'
+            
+            for row in worksheet.iter_rows(min_row=2):
+                for cell in row:
+                    cell.number_format = accounting_format_str
+
+            # Set a reasonable default width for columns
+            for column_cells in worksheet.columns:
+                worksheet.column_dimensions[column_cells[0].column_letter].width = 18
+  
+
         
         output.seek(0)
         
