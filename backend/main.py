@@ -15,6 +15,7 @@ import traceback
 import hashlib
 import secrets
 import os
+import re
 from collections import defaultdict
 import time
 import threading
@@ -159,6 +160,78 @@ import gc  # For manual garbage collection
 BATCH_SIZE = 5  # Process 5 filings at a time to stay within 1GB RAM
 
 
+def consolidate_dataframes(dfs: list[pd.DataFrame]) -> pd.DataFrame:
+    """
+    Consolidate a list of DataFrames based on metadata columns.
+    Ensures that metadata columns (label, concept, etc.) are used as the index
+    for concatenation, preventing duplication of these columns in the final output.
+    """
+    if not dfs:
+        return pd.DataFrame()
+    
+    # Identify metadata columns (order matters for index)
+    metadata_cols = []
+    seen_cols = set()
+    
+    for df in dfs:
+        for col in df.columns:
+            # Check if column is a duplicate of a metadata col (string match)
+            if col in seen_cols:
+                continue
+                
+            # Check if column is a date (YYYY-MM-DD format or datetime object)
+            is_date = False
+            if isinstance(col, (datetime, pd.Timestamp)):
+                is_date = True
+            elif isinstance(col, str) and re.match(r'^\d{4}-\d{2}-\d{2}$', col):
+                is_date = True
+            
+            if not is_date:
+                metadata_cols.append(col)
+                seen_cols.add(col)
+    
+    if not metadata_cols:
+        # Fallback if no metadata found (e.g. only dates?)
+        # Should not happen for standard edgartools output
+        return pd.concat(dfs, axis=1)
+    
+    # Reindex each DF to have common metadata columns
+    processed_dfs = []
+    for df in dfs:
+        # Ensure all metadata cols exist (fill with None/NaN)
+        # Note: modifying df in place might affect original reference, usually fine here
+        missing_cols = [c for c in metadata_cols if c not in df.columns]
+        if missing_cols:
+            df = df.reindex(columns=df.columns.tolist() + missing_cols)
+        
+        # Set index to metadata columns
+        # Drop=True removes them from columns (so they don't get duplicated)
+        # We need to drop duplicates in metadata index to avoid explosion
+        # If duplicates exist (as seen in BS inspection), we must handle them.
+        # Option: deduplicate by keeping first? Or use cumcount to differentiating?
+        # Inspection showed duplicates in 'concept, label'.
+        # But if we include ALL metadata columns (e.g. dimensions), are they unique?
+        # We assume so. If not, set_index/concat might verify_integrity=False (default).
+        # But duplicate index in concatenation causes Cartesian product of duplicates!
+        # We must deduplicate strictly.
+        df_indexed = df.set_index(metadata_cols)
+        
+        # Remove duplicate rows in the index if any remain?
+        if df_indexed.index.duplicated().any():
+            # Keep first occurrence of each unique metadata combination
+            df_indexed = df_indexed[~df_indexed.index.duplicated(keep='first')]
+            
+        processed_dfs.append(df_indexed)
+        
+    # Concat outer join
+    combined = pd.concat(processed_dfs, axis=1)
+    
+    # Reset index to restore metadata columns
+    combined.reset_index(inplace=True)
+    
+    return combined
+
+
 def process_job(job_id: str, name: str, email: str, ticker: str):
     """Process SEC data in background thread with batch processing for memory efficiency."""
     try:
@@ -205,7 +278,15 @@ def process_job(job_id: str, name: str, email: str, ticker: str):
         for batch_idx in range(num_batches):
             start_idx = batch_idx * BATCH_SIZE
             end_idx = min(start_idx + BATCH_SIZE, total_filings)
-            batch_filings = all_filings[start_idx:end_idx]
+            # Manual slicing of underlying PyArrow table to avoid edgartools bug
+            # Direct slicing of Filings object causes chunked array error
+            # List iteration fails because from_filings expects Filings object
+            sliced_data = all_filings.data.slice(offset=start_idx, length=end_idx - start_idx)
+            batch_filings = all_filings.__class__(
+                sliced_data,
+                cik=company.cik,
+                company_name=company.name
+            )
             
             jobs[job_id]["message"] = f"Processing batch {batch_idx + 1}/{num_batches} ({start_idx + 1}-{end_idx} of {total_filings} filings)..."
             print(f"[{datetime.now()}] Job {job_id}: Processing batch {batch_idx + 1}/{num_batches} (filings {start_idx + 1}-{end_idx})")
@@ -263,10 +344,11 @@ def process_job(job_id: str, name: str, email: str, ticker: str):
         print(f"[{datetime.now()}] Job {job_id}: Concatenating {len(all_bs_dfs)} batch results...")
         
         # Concatenate DataFrames horizontally (columns = periods)
-        BS = pd.concat(all_bs_dfs, axis=1) if all_bs_dfs else pd.DataFrame()
-        IS = pd.concat(all_is_dfs, axis=1) if all_is_dfs else pd.DataFrame()
-        CF = pd.concat(all_cf_dfs, axis=1) if all_cf_dfs else pd.DataFrame()
-        SE = pd.concat(all_se_dfs, axis=1) if all_se_dfs else pd.DataFrame()
+        # Concatenate DataFrames horizontally (columns = periods)
+        BS = consolidate_dataframes(all_bs_dfs)
+        IS = consolidate_dataframes(all_is_dfs)
+        CF = consolidate_dataframes(all_cf_dfs)
+        SE = consolidate_dataframes(all_se_dfs)
         
         # Clear batch lists
         del all_bs_dfs, all_is_dfs, all_cf_dfs, all_se_dfs
