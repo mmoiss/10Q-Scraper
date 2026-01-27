@@ -373,7 +373,7 @@ def process_job(job_id: str, name: str, email: str, ticker: str):
 
             # Apply Accounting format to all cells
             # Format: _(* #,##0.00_);_(* (#,##0.00);_(* "-"??_);_(@_)
-            accounting_format_str = '_(* #,##0.00_);_(* (#,##0.00);_(* "-"??_);_(@_)'
+            accounting_format_str = '_(* #,##0_);_(* (#,##0);_(* "-"??_);_(@_)'
             
             for row in worksheet.iter_rows(min_row=2):
                 for cell in row:
