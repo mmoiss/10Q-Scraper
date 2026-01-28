@@ -252,7 +252,7 @@ def process_job(job_id: str, name: str, email: str, ticker: str):
         # Fetch 10-Q filings
         jobs[job_id]["message"] = "Fetching 10-Q filings since 2010..."
         print(f"[{datetime.now()}] Job {job_id}: Fetching filings since 2010...")
-        all_filings = company.get_filings(form="10-Q").filter(date="2010-01-01:")
+        all_filings = company.get_filings(form=["10-K", "10-Q"]).filter(date="2010-01-01:")
         total_filings = len(all_filings)
         print(f"[{datetime.now()}] Job {job_id}: Found {total_filings} total filings")
         
