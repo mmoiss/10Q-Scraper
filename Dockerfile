@@ -23,7 +23,7 @@ COPY backend/ ./
 COPY --from=frontend-builder /app/frontend/out ./static
 
 # Railway provides PORT env variable
-ENV PORT=8000
+ENV PORT=7860
 
 # Start server with extended timeouts for long-running SEC data fetches
 # --timeout-keep-alive: time to keep connections alive

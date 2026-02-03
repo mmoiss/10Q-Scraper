@@ -19,7 +19,7 @@ echo ===========================================
 echo Press Ctrl+C to stop
 echo.
 
-docker run --rm -p 8000:8000 ^
+docker run --rm -p 8000:7860 ^
     -e AUTH_USERNAME=admin ^
     -e AUTH_PASSWORD_HASH=a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3 ^
     -e FRONTEND_URL=http://localhost:8000 ^
