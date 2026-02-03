@@ -20,6 +20,7 @@ from collections import defaultdict
 import time
 import threading
 import uuid
+import fdic_scraper
 
 
 app = FastAPI(title="SEC Scraper API")
@@ -76,6 +77,10 @@ class GenerateRequest(BaseModel):
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+
+class GenerateFDICRequest(BaseModel):
+    bank_codes: str
 
 
 # ============== RATE LIMITING ==============
@@ -391,8 +396,41 @@ def process_job(job_id: str, name: str, email: str, ticker: str):
         jobs[job_id]["status"] = "completed"
         jobs[job_id]["message"] = f"Report ready! Processed {total_filings} filings."
         jobs[job_id]["result"] = output.getvalue()
-        jobs[job_id]["filename"] = f"{ticker.upper()}_10Q_Financials.xlsx"
+        jobs[job_id]["filename"] = f"{ticker.upper()}_SEC_Financials.xlsx"
         print(f"[{datetime.now()}] Job {job_id}: Completed successfully with {total_filings} filings")
+        
+    except Exception as e:
+        print(f"[{datetime.now()}] Job {job_id}: Global error: {e}")
+        traceback.print_exc()
+        jobs[job_id]["status"] = "error"
+        jobs[job_id]["error"] = f"An unexpected error occurred: {str(e)}"
+
+
+def process_fdic_job(job_id: str, bank_codes_str: str):
+    """Process FDIC data in background thread."""
+    try:
+        jobs[job_id]["status"] = "processing"
+        jobs[job_id]["message"] = "Starting FDIC data fetch..."
+        
+        # Parse bank codes
+        codes = [c.strip() for c in bank_codes_str.split(",") if c.strip()]
+        
+        if not codes:
+            jobs[job_id]["status"] = "error"
+            jobs[job_id]["error"] = "No valid bank codes provided."
+            return
+            
+        jobs[job_id]["message"] = f"Fetching data for {len(codes)} banks..."
+        
+        # Generate Excel
+        excel_bytes = fdic_scraper.generate_fdic_excel(codes)
+        
+        # Store result
+        jobs[job_id]["status"] = "completed"
+        jobs[job_id]["message"] = f"Report ready! Processed {len(codes)} banks."
+        jobs[job_id]["result"] = excel_bytes
+        jobs[job_id]["filename"] = "FDIC_Financials.xlsx"
+        print(f"[{datetime.now()}] Job {job_id}: Completed successfully")
         
     except Exception as e:
         print(f"[{datetime.now()}] Job {job_id}: Global error: {e}")
@@ -517,6 +555,42 @@ async def generate_excel(
     return {"job_id": job_id, "status": "pending", "message": "Job started"}
 
 
+@app.post("/api/generate-fdic")
+async def generate_fdic_excel_endpoint(
+    request: Request,
+    data: GenerateFDICRequest,
+    _token: str = Depends(require_auth)
+):
+    """Start background job to generate FDIC Excel file."""
+    client_ip = get_client_ip(request)
+    print(f"[{datetime.now()}] Starting FDIC generation for {data.bank_codes} from {client_ip}")
+
+    if not check_rate_limit(f"generate_fdic_{client_ip}"):
+         raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded. Please wait before making another request."
+        )
+    
+    cleanup_expired_jobs()
+    
+    job_id = str(uuid.uuid4())
+    jobs[job_id] = {
+        "status": "pending",
+        "message": "Starting job...",
+        "created_at": datetime.now(timezone.utc),
+        "expires_at": datetime.now(timezone.utc) + JOB_EXPIRY,
+        "type": "fdic"
+    }
+    
+    thread = threading.Thread(
+        target=process_fdic_job,
+        args=(job_id, data.bank_codes)
+    )
+    thread.start()
+    
+    return {"job_id": job_id, "status": "pending", "message": "Job started"}
+
+
 @app.get("/api/job/{job_id}")
 async def get_job_status(job_id: str, request: Request, _token: str = Depends(require_auth)):
     """Check the status of a background job."""
@@ -529,6 +603,7 @@ async def get_job_status(job_id: str, request: Request, _token: str = Depends(re
         "status": job["status"],
         "message": job.get("message", ""),
         "error": job.get("error"),
+        "filename": job.get("filename"),
     }
 
 
